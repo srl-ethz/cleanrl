@@ -18,6 +18,13 @@ from torch.utils.tensorboard import SummaryWriter
 
 from cleanrl.ppo_continuous_action import Agent
 
+"""
+This is an implementation of the TGRL algorithm from https://openreview.net/forum?id=Hk3m8Nh7mn
+It follows that glorithm closely, but it is not a direct copy. The main difference is that the teacher coefficient update
+is not proportional to the difference in performance, but instead a fixed step size that its direction is determined by 
+the difference in performance. 
+This can be seen as a simplified version of the algorithm, but I also found it more stable.
+"""
 
 def parse_args():
     # fmt: off
@@ -42,7 +49,7 @@ def parse_args():
         help="model saving frequency")
 
     # Algorithm specific arguments
-    parser.add_argument("--env-id", type=str, default="Hopper-v4",
+    parser.add_argument("--env-id", type=str, default="Hopper-v2",
         help="the id of the environment")
     parser.add_argument("--teacher-folder", type=str, default=None,
         help="the name of the folder containing the weights for the teacher agent")
@@ -201,12 +208,6 @@ if __name__ == "__main__":
     qf2_target = SoftQNetwork(envs).to(device)
     qf1_target.load_state_dict(qf1.state_dict())
     qf2_target.load_state_dict(qf2.state_dict())
-    # qf1_aux = SoftQNetwork(envs).to(device)
-    # qf2_aux = SoftQNetwork(envs).to(device)
-    # qf1_target_aux = SoftQNetwork(envs).to(device)
-    # qf2_target_aux = SoftQNetwork(envs).to(device)
-    # qf1_target_aux.load_state_dict(qf1_aux.state_dict())
-    # qf2_target_aux.load_state_dict(qf2_aux.state_dict())
     qf1_kl = SoftQNetwork(envs).to(device)
     qf2_kl = SoftQNetwork(envs).to(device)
     qf1_target_kl = SoftQNetwork(envs).to(device)
@@ -216,13 +217,14 @@ if __name__ == "__main__":
     q_optimizer = optim.Adam(list(qf1.parameters()) + list(qf2.parameters()) + list(qf1_kl.parameters()) + list(qf2_kl.parameters()), lr=args.q_lr)
     actor_optimizer = optim.Adam(list(actor.parameters()) + list(actor_aux.parameters()), lr=args.policy_lr)
 
-    if args.teacher_folder is not None:
-        teacher = Agent(envs).to(device)
-        teacher_dir = os.path.join(os.getcwd(), 'wandb', args.teacher_folder, "files", "agent.pt")
-        teacher.load_state_dict(torch.load(teacher_dir, map_location=device))
-        teacher.eval()
-        for i, param in enumerate(teacher.parameters()):
-                param.requires_grad_(False)
+    # Load the teacher
+    assert args.teacher_folder is not None
+    teacher = Agent(envs).to(device)
+    teacher_dir = os.path.join(os.getcwd(), 'wandb', args.teacher_folder, "files", "agent.pt")
+    teacher.load_state_dict(torch.load(teacher_dir, map_location=device))
+    teacher.eval()
+    for i, param in enumerate(teacher.parameters()):
+            param.requires_grad_(False)
 
     # Automatic entropy tuning
     if args.autotune:
@@ -302,25 +304,15 @@ if __name__ == "__main__":
                 kl_next_obs = kl_divergence(student_dist_next_obs, teacher_dist_next_obs).sum(1)
                 next_q_kl_value = (1 - data.dones.flatten()) * args.gamma * ((min_qf_next_target).view(-1) + (kl_next_obs).view(-1))
 
-                # next_state_actions_aux, next_state_log_pi_aux, _, _ = actor_aux.get_action(data.next_observations)
-                # qf1_next_target_aux = qf1_target(data.next_observations, next_state_actions_aux)
-                # qf2_next_target_aux = qf2_target(data.next_observations, next_state_actions_aux)
-                # min_qf_next_target_aux = torch.min(qf1_next_target_aux, qf2_next_target_aux) - alpha * next_state_log_pi_aux
-                # next_q_value_aux = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * (min_qf_next_target_aux).view(-1)
-
             qf1_a_values = qf1(data.observations, data.actions).view(-1)
             qf2_a_values = qf2(data.observations, data.actions).view(-1)
-            # qf1_a_values_aux = qf1_aux(data.observations, data.actions).view(-1)
-            # qf2_a_values_aux = qf2_aux(data.observations, data.actions).view(-1)
             qf1_kl_a_values = qf1_kl(data.observations, data.actions).view(-1)
             qf2_kl_a_values = qf2_kl(data.observations, data.actions).view(-1)
             qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
             qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
-            # qf1_loss_aux = F.mse_loss(qf1_a_values_aux, next_q_value_aux)
-            # qf2_loss_aux = F.mse_loss(qf2_a_values_aux, next_q_value_aux)
             qf1_kl_loss = F.mse_loss(qf1_kl_a_values, next_q_kl_value)
             qf2_kl_loss = F.mse_loss(qf2_kl_a_values, next_q_kl_value)
-            qf_loss = qf1_loss + qf2_loss + qf1_kl_loss + qf2_kl_loss #+ qf1_loss_aux + qf2_loss_aux
+            qf_loss = qf1_loss + qf2_loss + qf1_kl_loss + qf2_kl_loss
 
             q_optimizer.zero_grad()
             qf_loss.backward()
@@ -381,19 +373,15 @@ if __name__ == "__main__":
                     target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
                 for param, target_param in zip(qf2_kl.parameters(), qf2_target_kl.parameters()):
                     target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
-                # for param, target_param in zip(qf1_aux.parameters(), qf1_target_aux.parameters()):
-                #     target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
-                # for param, target_param in zip(qf2_aux.parameters(), qf2_target_aux.parameters()):
-                #     target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
 
             if global_step % 100 == 0:
 
                 writer.add_scalar("losses/performance_difference", performance_difference, global_step)
-                writer.add_scalar("losses/qf1_values", qf1_a_values.mean().item(), global_step)
-                writer.add_scalar("losses/qf2_values", qf2_a_values.mean().item(), global_step)
+                writer.add_scalar("losses/qf1_kl_loss", qf1_kl_loss.mean().item(), global_step)
+                writer.add_scalar("losses/qf2_kl_loss", qf2_kl_loss.mean().item(), global_step)
                 writer.add_scalar("losses/qf1_loss", qf1_loss.item(), global_step)
                 writer.add_scalar("losses/qf2_loss", qf2_loss.item(), global_step)
-                writer.add_scalar("losses/qf_loss", qf_loss.item() / 2.0, global_step)
+                writer.add_scalar("losses/qf_loss", qf_loss.item() / 4.0, global_step)
                 writer.add_scalar("losses/actor_loss", actor_loss.item(), global_step)
                 writer.add_scalar("losses/actor_loss_aux", actor_loss_aux.item(), global_step)
                 writer.add_scalar("losses/cross_entropy_loss", cross_entropy_loss.item(), global_step)
