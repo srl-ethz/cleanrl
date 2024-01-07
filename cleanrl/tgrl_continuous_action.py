@@ -20,7 +20,7 @@ from cleanrl.ppo_continuous_action import Agent
 
 """
 This is an implementation of the TGRL algorithm from https://openreview.net/forum?id=Hk3m8Nh7mn
-It follows that glorithm closely, but it is not a direct copy. The main difference is that the teacher coefficient update
+It follows that aglorithm closely, but it is not a direct copy. The main difference is that the teacher coefficient update
 is not proportional to the difference in performance, but instead a fixed step size that its direction is determined by 
 the difference in performance. 
 This can be seen as a simplified version of the algorithm, but I also found it more stable.
@@ -85,6 +85,7 @@ def parse_args():
             help="Entropy regularization coefficient.")
     parser.add_argument("--autotune", type=lambda x:bool(strtobool(x)), default=True, nargs="?", const=True,
         help="automatic tuning of the entropy coefficient")
+    parser.add_argument("--history_length", type=int, default=20, help="The number of previous rewards to take into account for TGRL update.")
     args = parser.parse_args()
     # fmt: on
     return args
@@ -237,8 +238,8 @@ if __name__ == "__main__":
 
     teacher_coef = args.teacher_coef
     current_actor = actor
-    actor_performance = collections.deque(20 * [0], 20)
-    actor_aux_performance = collections.deque(20*[0], 20)
+    actor_performance = collections.deque(args.history_length * [0], args.history_length)
+    actor_aux_performance = collections.deque(args.history_length*[0], args.history_length)
     performance_difference = 0
 
     envs.single_observation_space.dtype = np.float32
@@ -360,8 +361,8 @@ if __name__ == "__main__":
                     teacher_coef = teacher_coef + args.teacher_coef_update
                 else:
                     teacher_coef = teacher_coef - args.teacher_coef_update
-                    if teacher_coef < 0:
-                        teacher_coef = 0
+                if teacher_coef < 0:
+                    teacher_coef = 0
 
             # update the target networks
             if global_step % args.target_network_frequency == 0:
