@@ -135,10 +135,10 @@ class Actor(nn.Module):
         self.fc_logstd = nn.Linear(256, np.prod(env.single_action_space.shape))
         # action rescaling
         self.register_buffer(
-            "action_scale", torch.tensor((env.action_space[0].high - env.action_space[0].low) / 2.0, dtype=torch.float32)
+            "action_scale", torch.tensor((env.action_space.high - env.action_space.low) / 2.0, dtype=torch.float32)
         )
         self.register_buffer(
-            "action_bias", torch.tensor((env.action_space[0].high + env.action_space[0].low) / 2.0, dtype=torch.float32)
+            "action_bias", torch.tensor((env.action_space.high + env.action_space.low) / 2.0, dtype=torch.float32)
         )
 
     def forward(self, x):
@@ -241,8 +241,9 @@ if __name__ == "__main__":
     actor_performance = collections.deque(args.history_length * [0], args.history_length)
     actor_aux_performance = collections.deque(args.history_length*[0], args.history_length)
     performance_difference = 0
-
-    envs.single_observation_space.dtype = np.float32
+    # forces obs space as NotImplementedError is thrown by get_obs_shape otherwise
+    print(envs.single_observation_space)
+    # envs.single_observation_space.dtype = gym.spaces.Box(low=-np.infty, high=np.infty, shape=(11,), dtype=np.float32)
     rb = ReplayBuffer(
         args.buffer_size,
         envs.single_observation_space,
@@ -295,20 +296,20 @@ if __name__ == "__main__":
         if global_step > args.learning_starts:
             data = rb.sample(args.batch_size)
             with torch.no_grad():
-                next_state_actions, next_state_log_pi, _, student_dist_next_obs = actor.get_action(data.next_observations)
-                qf1_next_target = qf1_target(data.next_observations, next_state_actions)
-                qf2_next_target = qf2_target(data.next_observations, next_state_actions)
+                next_state_actions, next_state_log_pi, _, student_dist_next_obs = actor.get_action(data.next_observations.float())
+                qf1_next_target = qf1_target(data.next_observations.float(), next_state_actions.float())
+                qf2_next_target = qf2_target(data.next_observations.float(), next_state_actions.float())
                 min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_pi
                 next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * (min_qf_next_target).view(-1)
 
-                _, _, _, _, teacher_dist_next_obs = teacher.get_action_and_value(data.next_observations)
+                _, _, _, _, teacher_dist_next_obs = teacher.get_action_and_value(data.next_observations.float())
                 kl_next_obs = kl_divergence(student_dist_next_obs, teacher_dist_next_obs).sum(1)
                 next_q_kl_value = (1 - data.dones.flatten()) * args.gamma * ((min_qf_next_target).view(-1) + (kl_next_obs).view(-1))
 
-            qf1_a_values = qf1(data.observations, data.actions).view(-1)
-            qf2_a_values = qf2(data.observations, data.actions).view(-1)
-            qf1_kl_a_values = qf1_kl(data.observations, data.actions).view(-1)
-            qf2_kl_a_values = qf2_kl(data.observations, data.actions).view(-1)
+            qf1_a_values = qf1(data.observations.float(), data.actions.float()).view(-1)
+            qf2_a_values = qf2(data.observations.float(), data.actions.float()).view(-1)
+            qf1_kl_a_values = qf1_kl(data.observations.float(), data.actions.float()).view(-1)
+            qf2_kl_a_values = qf2_kl(data.observations.float(), data.actions.float()).view(-1)
             qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
             qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
             qf1_kl_loss = F.mse_loss(qf1_kl_a_values, next_q_kl_value)
@@ -323,18 +324,18 @@ if __name__ == "__main__":
                 for _ in range(
                     args.policy_frequency
                 ):  # compensate for the delay by doing 'actor_update_interval' instead of 1
-                    pi, log_pi, _, student_dist = actor.get_action(data.observations)
-                    pi_aux, log_pi_aux, _, _ = actor_aux.get_action(data.observations)
-                    _, _, _, _, teacher_dist = teacher.get_action_and_value(data.observations)
+                    pi, log_pi, _, student_dist = actor.get_action(data.observations.float())
+                    pi_aux, log_pi_aux, _, _ = actor_aux.get_action(data.observations.float())
+                    _, _, _, _, teacher_dist = teacher.get_action_and_value(data.observations.float())
                     cross_entropy = kl_divergence(student_dist, teacher_dist).sum(1)
-                    qf1_pi = qf1(data.observations, pi)
-                    qf2_pi = qf2(data.observations, pi)
+                    qf1_pi = qf1(data.observations.float(), pi)
+                    qf2_pi = qf2(data.observations.float(), pi)
                     min_qf_pi = torch.min(qf1_pi, qf2_pi).view(-1)
-                    qf1_pi_aux = qf1(data.observations, pi_aux)
-                    qf2_pi_aux = qf2(data.observations, pi_aux)
+                    qf1_pi_aux = qf1(data.observations.float(), pi_aux)
+                    qf2_pi_aux = qf2(data.observations.float(), pi_aux)
                     min_qf_pi_aux = torch.min(qf1_pi_aux, qf2_pi_aux).view(-1)
-                    qf1_kl_pi = qf1_kl(data.observations, pi)
-                    qf2_kl_pi = qf2_kl(data.observations, pi)
+                    qf1_kl_pi = qf1_kl(data.observations.float(), pi)
+                    qf2_kl_pi = qf2_kl(data.observations.float(), pi)
                     min_qf_kl_pi = torch.min(qf1_kl_pi, qf2_kl_pi).view(-1)
                     actor_loss = ((alpha * log_pi) - min_qf_pi).mean()
                     actor_loss_aux = ((alpha * log_pi_aux) - min_qf_pi_aux).mean()
@@ -347,7 +348,7 @@ if __name__ == "__main__":
 
                     if args.autotune:
                         with torch.no_grad():
-                            _, log_pi, _, _ = actor.get_action(data.observations)
+                            _, log_pi, _, _ = actor.get_action(data.observations.float())
                         alpha_loss = (-log_alpha * (log_pi + target_entropy)).mean()
 
                         a_optimizer.zero_grad()
