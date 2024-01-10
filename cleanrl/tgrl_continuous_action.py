@@ -258,7 +258,14 @@ if __name__ == "__main__":
     for global_step in range(args.total_timesteps):
         # ALGO LOGIC: put action logic here
         if global_step < args.learning_starts:
-            actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
+            actions_random = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
+            actions_teacher = np.array(teacher.get_action_and_value(torch.Tensor(obs).to(device))[0].detach().cpu())
+
+            # for elem in action_and_val_teacher:
+            #     print('teacher action shape: ', elem.shape)
+            actions = actions_teacher
+
+
         else:
             actions, _, _, _ = current_actor.get_action(torch.Tensor(obs).to(device))
             actions = actions.detach().cpu().numpy()
