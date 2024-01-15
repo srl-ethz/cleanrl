@@ -85,6 +85,8 @@ def parse_args():
             help="Entropy regularization coefficient.")
     parser.add_argument("--beta", type=float, default=0.2,
             help="Termination regularization coefficient.")
+    parser.add_argument("--finetune-teacher", type=lambda x:bool(strtobool(x)), default=True, nargs="?", const=True,
+        help="if true, the actor network will start from the teacher and will be finetuned during training")
     parser.add_argument("--autotune_beta", type=lambda x:bool(strtobool(x)), default=True, nargs="?", const=True,
         help="switches off automatic tuning of the termination regularizer beta")
     parser.add_argument("--autotune_alpha", type=lambda x:bool(strtobool(x)), default=True, nargs="?", const=True,
@@ -97,6 +99,7 @@ def parse_args():
 
 def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
+        print('SET SNEED TO: ', seed)
         env = gym.make(env_id)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
@@ -224,15 +227,22 @@ if __name__ == "__main__":
 
     # Load the teacher
     assert args.teacher_folder is not None
-    teacher = Agent(envs).to(device)
-    teacher_dir = os.path.join(os.getcwd(), 'wandb', args.teacher_folder, "files", "agent.pt")
+    if args.finetune_teacher:
+        print('Loading pretrained actor...')
+        teacher = Actor(envs).to(device)
+        teacher_dir = os.path.join(os.getcwd(), 'wandb', args.teacher_folder, "files", "actor.pt")
+        actor.load_state_dict(torch.load(teacher_dir, map_location=device))
+        print('Loaded pretrained actor!')
+    else:
+        teacher = Agent(envs).to(device)
+        teacher_dir = os.path.join(os.getcwd(), 'wandb', args.teacher_folder, "files", "agent.pt")
     teacher.load_state_dict(torch.load(teacher_dir, map_location=device))
     teacher.eval()
     for i, param in enumerate(teacher.parameters()):
             param.requires_grad_(False)
 
     # Automatic entropy tuning
-    if args.autotune:
+    if args.autotune_alpha:
         target_entropy = -torch.prod(torch.Tensor(envs.single_action_space.shape).to(device)).item()
         log_alpha = torch.zeros(1, requires_grad=True, device=device)
         alpha = log_alpha.exp().item()
@@ -263,7 +273,11 @@ if __name__ == "__main__":
         # ALGO LOGIC: put action logic here
         if global_step < args.learning_starts:
             actions_random = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
-            actions_teacher = np.array(teacher.get_action_and_value(torch.Tensor(obs).to(device))[0].detach().cpu())
+            if args.finetune_teacher:
+                actions_teacher, _, _, _ = teacher.get_action(torch.Tensor(obs).to(device))
+                actions_teacher = actions_teacher.detach().cpu().numpy()
+            else:
+                actions_teacher = np.array(teacher.get_action_and_value(torch.Tensor(obs).to(device))[0].detach().cpu())
 
             # for elem in action_and_val_teacher:
             #     print('teacher action shape: ', elem.shape)
@@ -312,8 +326,10 @@ if __name__ == "__main__":
                 qf2_next_target = qf2_target(data.next_observations.float(), next_state_actions.float())
                 min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_pi
                 next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * (min_qf_next_target).view(-1)
-
-                _, _, _, _, teacher_dist_next_obs = teacher.get_action_and_value(data.next_observations.float())
+                if args.finetune_teacher:
+                    _, _, _, teacher_dist_next_obs = teacher.get_action(data.next_observations.float())
+                else:
+                    _, _, _, _, teacher_dist_next_obs = teacher.get_action_and_value(data.next_observations.float())
                 kl_next_obs = kl_divergence(student_dist_next_obs, teacher_dist_next_obs).sum(1)
                 next_q_kl_value = (1 - data.dones.flatten()) * args.gamma * ((min_qf_next_target).view(-1) + (kl_next_obs).view(-1))
 
@@ -337,7 +353,11 @@ if __name__ == "__main__":
                 ):  # compensate for the delay by doing 'actor_update_interval' instead of 1
                     pi, log_pi, _, student_dist = actor.get_action(data.observations.float())
                     pi_aux, log_pi_aux, _, _ = actor_aux.get_action(data.observations.float())
-                    _, _, _, _, teacher_dist = teacher.get_action_and_value(data.observations.float())
+                    if args.finetune_teacher:
+                        # removed an argument from here as I'll work with a pretrained Actor network as teacher
+                        _, _, _, teacher_dist = teacher.get_action(data.observations.float())
+                    else:
+                        _, _, _, _, teacher_dist = teacher.get_action_and_value(data.observations.float())
                     cross_entropy = kl_divergence(student_dist, teacher_dist).sum(1)
                     qf1_pi = qf1(data.observations.float(), pi)
                     qf2_pi = qf2(data.observations.float(), pi)
@@ -357,7 +377,7 @@ if __name__ == "__main__":
                     overall_loss.backward()
                     actor_optimizer.step()
 
-                    if args.autotune:
+                    if args.autotune_alpha:
                         with torch.no_grad():
                             _, log_pi, _, _ = actor.get_action(data.observations.float())
                         alpha_loss = (-log_alpha * (log_pi + target_entropy)).mean()
@@ -387,6 +407,10 @@ if __name__ == "__main__":
                 for param, target_param in zip(qf2_kl.parameters(), qf2_target_kl.parameters()):
                     target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
 
+            # save actor so we can reuse it later and start finetuning
+            if global_step % 1000 == 0:
+                torch.save(actor.state_dict(), f"runs/{run_name}/actor.pt")
+
             if global_step % 100 == 0:
 
                 writer.add_scalar("losses/performance_difference", performance_difference, global_step)
@@ -403,7 +427,7 @@ if __name__ == "__main__":
                 writer.add_scalar("losses/alpha", alpha, global_step)
                 print("SPS:", int(global_step / (time.time() - start_time)))
                 writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
-                if args.autotune:
+                if args.autotune_alpha:
                     writer.add_scalar("losses/alpha_loss", alpha_loss.item(), global_step)
 
     envs.close()
