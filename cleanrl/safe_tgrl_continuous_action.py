@@ -41,6 +41,8 @@ def parse_args():
         help="if toggled, this experiment will be tracked with Weights and Biases")
     parser.add_argument("--wandb-project-name", type=str, default="cleanRL",
         help="the wandb's project name")
+    parser.add_argument("--wandb-group-name", type=str, default="miscTest",
+        help="the wandb group name")
     parser.add_argument("--wandb-entity", type=str, default=None,
         help="the entity (team) of wandb's project")
     parser.add_argument("--capture-video", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
@@ -55,8 +57,12 @@ def parse_args():
         help="the name of the folder containing the weights for the teacher agent")
     parser.add_argument("--teacher-coef", type=float, default=1.0,
         help="coefficient of the entropy")
+    parser.add_argument("--safety-coef", type=float, default=1.0,
+        help="coefficient of the safety regularizer")
     parser.add_argument("--teacher-coef-update", type=float, default=0.01,
         help="coefficient of the entropy")
+    parser.add_argument("--beta-update", type=float, default=0.01,
+        help="update const of the safety constant, 0.01 by default")
     parser.add_argument("--coefficient-frequency", type=int, default=1000,
         help="the frequency of updates for the target nerworks")
     parser.add_argument("--total-timesteps", type=int, default=1000000,
@@ -182,6 +188,7 @@ if __name__ == "__main__":
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
+            group=args.wandb_group_name,
             sync_tensorboard=True,
             config=vars(args),
             name=run_name,
@@ -251,6 +258,7 @@ if __name__ == "__main__":
         alpha = args.alpha
 
     teacher_coef = args.teacher_coef
+    safety_coef = args.safety_coef # (beta + lamda_2)/(1+lambda_1)
     current_actor = actor
     actor_performance = collections.deque(args.history_length * [0], args.history_length)
     actor_aux_performance = collections.deque(args.history_length*[0], args.history_length)
@@ -269,6 +277,13 @@ if __name__ == "__main__":
 
     # TRY NOT TO MODIFY: start the game
     obs = envs.reset()
+    # inits for episode length tracking
+    teacher_episode_lengths = []
+    ema_ep_len_alpha = 0.3
+    prev_episode_len = 0
+    ep_length_ema = 0
+    max_len = 1000
+
     for global_step in range(args.total_timesteps):
         # ALGO LOGIC: put action logic here
         if global_step < args.learning_starts:
@@ -294,6 +309,15 @@ if __name__ == "__main__":
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         for info in infos:
             if "episode" in info.keys():
+                if global_step < args.learning_starts:
+                    # this is still the teacher
+                    prev_episode_len = info["episode"]["l"]
+                    teacher_episode_lengths.append(prev_episode_len)
+                    teacher_ep_length = np.mean(np.array(teacher_episode_lengths))
+                else:
+                    if current_actor is actor:
+                        ep_length_ema = ema_ep_len_alpha * info["episode"]['l'] + (1-ema_ep_len_alpha) * ep_length_ema
+            
                 print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                 if current_actor is actor:
                     writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
@@ -371,7 +395,8 @@ if __name__ == "__main__":
                     actor_loss = ((alpha * log_pi) - min_qf_pi).mean()
                     actor_loss_aux = ((alpha * log_pi_aux) - min_qf_pi_aux).mean()
                     cross_entropy_loss = (cross_entropy - min_qf_kl_pi).mean()
-                    overall_loss = actor_loss + teacher_coef * cross_entropy_loss + actor_loss_aux
+                    safety_loss = (max_len - ep_length_ema)/max_len
+                    overall_loss = actor_loss + teacher_coef * cross_entropy_loss + actor_loss_aux + safety_coef * safety_loss
 
                     actor_optimizer.zero_grad()
                     overall_loss.backward()
@@ -395,6 +420,15 @@ if __name__ == "__main__":
                     teacher_coef = teacher_coef - args.teacher_coef_update
                 if teacher_coef < 0:
                     teacher_coef = 0
+
+                # tune beta if specified
+                if args.autotune_beta:
+                    safety_difference = ep_length_ema - teacher_ep_length
+                    if safety_difference > 0:
+                        safety_coef -= args.beta_update
+                    else:
+                        safety_coef += args.beta_update
+                    safety_coef = max(0, safety_coef)
 
             # update the target networks
             if global_step % args.target_network_frequency == 0:
@@ -425,6 +459,10 @@ if __name__ == "__main__":
                 writer.add_scalar("losses/cross_entropy", cross_entropy.mean().item(), global_step)
                 writer.add_scalar("losses/teacher_coef", teacher_coef, global_step)
                 writer.add_scalar("losses/alpha", alpha, global_step)
+                writer.add_scalar("losses/beta", safety_coef, global_step)
+                writer.add_scalar("losses/ema_ep_len", ep_length_ema, global_step)
+                if 'safety_difference' in locals():
+                    writer.add_scalar("losses/safety_difference", safety_difference, global_step)
                 print("SPS:", int(global_step / (time.time() - start_time)))
                 writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
                 if args.autotune_alpha:
