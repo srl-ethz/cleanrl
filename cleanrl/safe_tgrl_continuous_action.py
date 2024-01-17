@@ -93,8 +93,8 @@ def parse_args():
             help="Termination regularization coefficient.")
     parser.add_argument("--finetune-teacher", type=lambda x:bool(strtobool(x)), default=True, nargs="?", const=True,
         help="if true, the actor network will start from the teacher and will be finetuned during training")
-    parser.add_argument("--autotune_beta", type=lambda x:bool(strtobool(x)), default=True, nargs="?", const=True,
-        help="switches off automatic tuning of the termination regularizer beta")
+    parser.add_argument("--autotune-beta", type=lambda x:bool(strtobool(x)), default=True, nargs="?", const=True,
+        help="switches on/off automatic tuning of the termination regularizer beta")
     parser.add_argument("--autotune_alpha", type=lambda x:bool(strtobool(x)), default=True, nargs="?", const=True,
         help="automatic tuning of the entropy coefficient")
     parser.add_argument("--history_length", type=int, default=20, help="The number of previous rewards to take into account for TGRL update.")
@@ -219,17 +219,20 @@ if __name__ == "__main__":
     actor_aux = Actor(envs).to(device)
     qf1 = SoftQNetwork(envs).to(device)
     qf2 = SoftQNetwork(envs).to(device)
+    qf_t = SoftQNetwork(envs).to(device)
     qf1_target = SoftQNetwork(envs).to(device)
     qf2_target = SoftQNetwork(envs).to(device)
+    qf_t_target = SoftQNetwork(envs).to(device)
     qf1_target.load_state_dict(qf1.state_dict())
     qf2_target.load_state_dict(qf2.state_dict())
+    qf_t_target.load_state_dict(qf_t.state_dict())
     qf1_kl = SoftQNetwork(envs).to(device)
     qf2_kl = SoftQNetwork(envs).to(device)
     qf1_target_kl = SoftQNetwork(envs).to(device)
     qf2_target_kl = SoftQNetwork(envs).to(device)
     qf1_target_kl.load_state_dict(qf1_kl.state_dict())
     qf2_target_kl.load_state_dict(qf2_kl.state_dict())
-    q_optimizer = optim.Adam(list(qf1.parameters()) + list(qf2.parameters()) + list(qf1_kl.parameters()) + list(qf2_kl.parameters()), lr=args.q_lr)
+    q_optimizer = optim.Adam(list(qf1.parameters()) + list(qf2.parameters()) + list(qf_t.parameters()) + list(qf1_kl.parameters()) + list(qf2_kl.parameters()), lr=args.q_lr)
     actor_optimizer = optim.Adam(list(actor.parameters()) + list(actor_aux.parameters()), lr=args.policy_lr)
 
     # Load the teacher
@@ -348,8 +351,10 @@ if __name__ == "__main__":
                 next_state_actions, next_state_log_pi, _, student_dist_next_obs = actor.get_action(data.next_observations.float())
                 qf1_next_target = qf1_target(data.next_observations.float(), next_state_actions.float())
                 qf2_next_target = qf2_target(data.next_observations.float(), next_state_actions.float())
+                qf_t_next_target = qf_t_target(data.next_observations.float(), next_state_actions.float())
                 min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_pi
                 next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * (min_qf_next_target).view(-1)
+                next_q_t_value = 1 + (1 - data.dones.flatten()) * (args.gamma * qf_t_next_target).view(-1)
                 if args.finetune_teacher:
                     _, _, _, teacher_dist_next_obs = teacher.get_action(data.next_observations.float())
                 else:
@@ -359,13 +364,15 @@ if __name__ == "__main__":
 
             qf1_a_values = qf1(data.observations.float(), data.actions.float()).view(-1)
             qf2_a_values = qf2(data.observations.float(), data.actions.float()).view(-1)
+            qf_t_a_values = qf_t(data.observations.float(), data.actions.float()).view(-1)
             qf1_kl_a_values = qf1_kl(data.observations.float(), data.actions.float()).view(-1)
             qf2_kl_a_values = qf2_kl(data.observations.float(), data.actions.float()).view(-1)
             qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
             qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
+            qf_t_loss = F.mse_loss(qf_t_a_values, next_q_t_value)
             qf1_kl_loss = F.mse_loss(qf1_kl_a_values, next_q_kl_value)
             qf2_kl_loss = F.mse_loss(qf2_kl_a_values, next_q_kl_value)
-            qf_loss = qf1_loss + qf2_loss + qf1_kl_loss + qf2_kl_loss
+            qf_loss = qf1_loss + qf2_loss + qf1_kl_loss + qf2_kl_loss + qf_t_loss
 
             q_optimizer.zero_grad()
             qf_loss.backward()
@@ -385,6 +392,7 @@ if __name__ == "__main__":
                     cross_entropy = kl_divergence(student_dist, teacher_dist).sum(1)
                     qf1_pi = qf1(data.observations.float(), pi)
                     qf2_pi = qf2(data.observations.float(), pi)
+                    qf_t_pi = qf_t(data.observations.float(), pi)
                     min_qf_pi = torch.min(qf1_pi, qf2_pi).view(-1)
                     qf1_pi_aux = qf1(data.observations.float(), pi_aux)
                     qf2_pi_aux = qf2(data.observations.float(), pi_aux)
@@ -395,7 +403,7 @@ if __name__ == "__main__":
                     actor_loss = ((alpha * log_pi) - min_qf_pi).mean()
                     actor_loss_aux = ((alpha * log_pi_aux) - min_qf_pi_aux).mean()
                     cross_entropy_loss = (cross_entropy - min_qf_kl_pi).mean()
-                    safety_loss = (max_len - ep_length_ema)/max_len
+                    safety_loss = (1 - qf_t_pi).mean()
                     overall_loss = actor_loss + teacher_coef * cross_entropy_loss + actor_loss_aux + safety_coef * safety_loss
 
                     actor_optimizer.zero_grad()
@@ -422,8 +430,8 @@ if __name__ == "__main__":
                     teacher_coef = 0
 
                 # tune beta if specified
+                safety_difference = ep_length_ema - teacher_ep_length
                 if args.autotune_beta:
-                    safety_difference = ep_length_ema - teacher_ep_length
                     if safety_difference > 0:
                         safety_coef -= args.beta_update
                     else:
