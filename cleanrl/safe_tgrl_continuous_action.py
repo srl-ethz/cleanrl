@@ -312,6 +312,7 @@ if __name__ == "__main__":
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         for info in infos:
             if "episode" in info.keys():
+                writer.add_scalar("debug/termination", 1, global_step)
                 if global_step < args.learning_starts:
                     # this is still the teacher
                     prev_episode_len = info["episode"]["l"]
@@ -333,6 +334,8 @@ if __name__ == "__main__":
                     actor_aux_performance.appendleft(info["episode"]["r"])
                     current_actor = actor
                 break
+            else:
+                writer.add_scalar("debug/termination", 1, global_step)
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `terminal_observation`
         real_next_obs = next_obs.copy()
@@ -354,7 +357,7 @@ if __name__ == "__main__":
                 qf_t_next_target = qf_t_target(data.next_observations.float(), next_state_actions.float())
                 min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_pi
                 next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * (min_qf_next_target).view(-1)
-                next_q_t_value = 1 + (1 - data.dones.flatten()) * (args.gamma * qf_t_next_target).view(-1)
+                next_q_t_value = data.dones.flatten() + (1 - data.dones.flatten()) * (args.gamma * qf_t_next_target).view(-1)
                 if args.finetune_teacher:
                     _, _, _, teacher_dist_next_obs = teacher.get_action(data.next_observations.float())
                 else:
@@ -370,6 +373,12 @@ if __name__ == "__main__":
             qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
             qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
             qf_t_loss = F.mse_loss(qf_t_a_values, next_q_t_value)
+            writer.add_scalar("debug/q_t_loss", qf_t_loss.item(), global_step)
+            print("Q:",qf_t_a_values[:5])
+            print("D:",data.dones.flatten()[:5])
+            # are q functions correlated with the dones?
+            dones_qt_err = torch.mean(torch.square(qf_t_a_values - data.dones.flatten()))
+            writer.add_scalar("debug/q_dones_err", dones_qt_err, global_step)
             qf1_kl_loss = F.mse_loss(qf1_kl_a_values, next_q_kl_value)
             qf2_kl_loss = F.mse_loss(qf2_kl_a_values, next_q_kl_value)
             qf_loss = qf1_loss + qf2_loss + qf1_kl_loss + qf2_kl_loss + qf_t_loss
@@ -403,7 +412,7 @@ if __name__ == "__main__":
                     actor_loss = ((alpha * log_pi) - min_qf_pi).mean()
                     actor_loss_aux = ((alpha * log_pi_aux) - min_qf_pi_aux).mean()
                     cross_entropy_loss = (cross_entropy - min_qf_kl_pi).mean()
-                    safety_loss = (1 - qf_t_pi).mean()
+                    safety_loss = (data.dones.flatten() - qf_t_pi).mean()
                     overall_loss = actor_loss + teacher_coef * cross_entropy_loss + actor_loss_aux + safety_coef * safety_loss
 
                     actor_optimizer.zero_grad()
@@ -464,6 +473,8 @@ if __name__ == "__main__":
                 writer.add_scalar("losses/actor_loss", actor_loss.item(), global_step)
                 writer.add_scalar("losses/actor_loss_aux", actor_loss_aux.item(), global_step)
                 writer.add_scalar("losses/cross_entropy_loss", cross_entropy_loss.item(), global_step)
+                writer.add_scalar("losses/safety_loss", safety_loss.item(), global_step)
+                writer.add_scalar("losses/combined_loss", overall_loss.item(), global_step)
                 writer.add_scalar("losses/cross_entropy", cross_entropy.mean().item(), global_step)
                 writer.add_scalar("losses/teacher_coef", teacher_coef, global_step)
                 writer.add_scalar("losses/alpha", alpha, global_step)
