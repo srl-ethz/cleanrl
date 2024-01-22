@@ -103,6 +103,8 @@ def parse_args():
         help="switches on/off automatic tuning of the termination regularizer beta")
     parser.add_argument("--autotune_alpha", type=lambda x:bool(strtobool(x)), default=True, nargs="?", const=True,
         help="automatic tuning of the entropy coefficient")
+    parser.add_argument("--autotune-adaptive-rate", type=lambda x:bool(strtobool(x)), default=False, nargs="?", const=True,
+        help="automatic tuning of the entropy and safety coefficient in a way that is suggested by the theory")
     parser.add_argument("--history_length", type=int, default=20, help="The number of previous rewards to take into account for TGRL update.")
     args = parser.parse_args()
     # fmt: on
@@ -270,6 +272,7 @@ if __name__ == "__main__":
 
     teacher_coef = args.teacher_coef
     safety_coef = args.safety_coef # (beta + lamda_2)/(1+lambda_1)
+    lambda_1, lambda_2 = 0,0
     current_actor = actor
     actor_performance = collections.deque(args.history_length * [0], args.history_length)
     actor_aux_performance = collections.deque(args.history_length*[0], args.history_length)
@@ -294,6 +297,7 @@ if __name__ == "__main__":
     prev_episode_len = 0
     ep_length_ema = 0
     max_len = 1000
+    mu = 0.00002
 
     for global_step in range(args.total_timesteps):
         # ALGO LOGIC: put action logic here
@@ -350,7 +354,7 @@ if __name__ == "__main__":
         #     if d:
         #         real_next_obs[idx] = infos[idx]["terminal_observation"]
         # testing "alive" reward
-        rewards += args.alive_reward
+        rewards += args.alive_reward * safety_coef
         rb.add(obs, real_next_obs, actions, rewards, dones, infos)
 
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
@@ -435,21 +439,31 @@ if __name__ == "__main__":
 
             if global_step % args.coefficient_frequency == 0:
                 performance_difference = np.mean(actor_performance) - np.mean(actor_aux_performance)
-                if performance_difference > 0:
-                    teacher_coef = teacher_coef + args.teacher_coef_update
+                if args.autotune_adaptive_rate:
+                    teacher_coef = (args.teacher_coef)/(1 + lambda_1)
                 else:
-                    teacher_coef = teacher_coef - args.teacher_coef_update
+                    if performance_difference > 0:
+                        teacher_coef = teacher_coef + args.teacher_coef_update
+                    else:
+                        teacher_coef = teacher_coef - args.teacher_coef_update
                 if teacher_coef < 0:
                     teacher_coef = 0
 
                 # tune beta if specified
                 safety_difference = ep_length_ema - teacher_ep_length
                 if args.autotune_beta:
-                    if safety_difference > 0:
-                        safety_coef -= args.beta_update
+                    if args.autotune_adaptive_rate:
+                        safety_coef = (args.safety_coef + lambda_2)/(1 + lambda_1)
                     else:
-                        safety_coef += args.beta_update
+                        if safety_difference > 0:
+                            safety_coef -= args.beta_update
+                        else:
+                            safety_coef += args.beta_update
                     safety_coef = max(0, safety_coef)
+
+                # update lambdas
+                lambda_1 -= mu * performance_difference
+                lambda_2 -= mu * safety_difference
 
             # update the target networks
             if global_step % args.target_network_frequency == 0:
