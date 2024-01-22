@@ -37,6 +37,8 @@ def parse_args():
         help="if toggled, `torch.backends.cudnn.deterministic=False`")
     parser.add_argument("--cuda", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="if toggled, cuda will be enabled by default")
+    parser.add_argument("--device-id", type=str, default="default",
+        help="Which gpu to use. If default, will either use cpu or cuda:0, as defined by --cuda")
     parser.add_argument("--track", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="if toggled, this experiment will be tracked with Weights and Biases")
     parser.add_argument("--wandb-project-name", type=str, default="cleanRL",
@@ -91,6 +93,8 @@ def parse_args():
             help="Entropy regularization coefficient.")
     parser.add_argument("--beta", type=float, default=0.2,
             help="Termination regularization coefficient.")
+    parser.add_argument("--alive-reward", type=float, default=1.0,
+            help="Additional reward given for keeping the environment alive at each iteration.")
     parser.add_argument("--finetune-teacher", type=lambda x:bool(strtobool(x)), default=True, nargs="?", const=True,
         help="if true, the actor network will start from the teacher and will be finetuned during training")
     parser.add_argument("--collect-random", type=lambda x:bool(strtobool(x)), default=False, nargs="?", const=True,
@@ -210,6 +214,8 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    if args.device_id is not 'default':
+        device = torch.device(args.device_id)
 
     # env setup
     envs = gym.vector.SyncVectorEnv([make_env(args.env_id, args.seed, 0, args.capture_video, run_name)])
@@ -344,7 +350,7 @@ if __name__ == "__main__":
         #     if d:
         #         real_next_obs[idx] = infos[idx]["terminal_observation"]
         # testing "alive" reward
-        rewards += 0.4
+        rewards += args.alive_reward
         rb.add(obs, real_next_obs, actions, rewards, dones, infos)
 
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
